@@ -153,7 +153,12 @@ def run_single_experiment(
         if q_heads != kv_heads:
             kwargs["enable_gqa"] = True
 
-        if config.backend != "fav3" and config.backend != "fakv":
+        if config.backend == "default":
+            compiled_flex_attn_forward = torch.compile(flex_attention, dynamic=dynamic)
+            def eager_sdpa(query, key, value, mask_mod):
+                query = F.pad(query, (0, 0, 0, 128-q_seq_len))
+                return compiled_flex_attn_forward(query, key, value, block_mask=mask_mod, enable_gqa=True)[:, :, :q_seq_len, :]
+        elif config.backend != "fav3" and config.backend != "fakv":
 
             def eager_sdpa(query, key, value, attn_mask):
                 return F.scaled_dot_product_attention(
@@ -228,7 +233,7 @@ def run_single_experiment(
             query,
             key,
             value,
-            attn_mask,
+            block_mask if config.backend == "default" else attn_mask,
         )
         forward_compiled_time = benchmark_torch_function_in_microseconds(
             compiled_sdpa,
@@ -240,7 +245,7 @@ def run_single_experiment(
             enable_gqa=kwargs.get("enable_gqa", False),
         )
 
-        out_eager = eager_sdpa(query, key, value, attn_mask)
+        out_eager = eager_sdpa(query, key, value, block_mask if config.backend == "default" else attn_mask,)
         out_compile = compiled_sdpa(
             query,
             key,
@@ -447,7 +452,7 @@ def generate_score_mods(score_mods: List[str]) -> List[Callable | None]:
     function_dict = {
         "noop": None,
         "causal": None,
-        "offset": None,
+        "offset": relative_bias,
         "rel": relative_bias,
         "head_bias": head_bias,
     }
