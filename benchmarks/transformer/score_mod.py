@@ -153,14 +153,14 @@ def run_single_experiment(
         if q_heads != kv_heads:
             kwargs["enable_gqa"] = True
 
-        if config.backend != "fav3":
+        if config.backend != "fav3" and config.backend != "fakv":
 
             def eager_sdpa(query, key, value, attn_mask):
                 return F.scaled_dot_product_attention(
                     query, key, value, attn_mask, **kwargs
                 )
 
-        else:
+        elif config.backend == "fav3":
             try:
                 from flash_attn_interface import flash_attn_func
             except ImportError:
@@ -175,6 +175,26 @@ def run_single_experiment(
                 k = key.transpose(1, 2)
                 v = value.transpose(1, 2)
                 return (flash_attn_func(q, k, v, **kwargs)[0]).transpose(1, 2)
+
+        else:
+            try:
+                from flash_attn import flash_attn_with_kvcache
+            except ImportError:
+                print(
+                    "Flash attention 2 is not installed. Please install it to run with fakv backend."
+                )
+                raise
+            kvcache_args = {}
+            if get_func_name(config.mask_mod) == "offset":
+                kvcache_args["cache_seqlens"] = kv_seq_len // 2
+
+            def eager_sdpa(query, key, value, _):
+                q = query.transpose(1, 2)
+                k = key.transpose(1, 2)
+                v = value.transpose(1, 2)
+                return (flash_attn_with_kvcache(q, k, v, **kvcache_args)).transpose(
+                    1, 2
+                )
 
         if max_autotune:
             compiled_sdpa = torch.compile(
@@ -455,6 +475,7 @@ def get_backend_context(backend: str):
         "math": sdpa_kernel(SDPBackend.MATH),
         "efficient": sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION),
         "fav3": nullcontext(),
+        "fakv": nullcontext(),
     }
 
     if backend not in backends:
@@ -738,7 +759,7 @@ Ignores -b batch size and calculate batch size from kv_cache size instead when s
     parser.add_argument(
         "--backend",
         type=str,
-        choices=["default", "math", "efficient", "cudnn", "fav2", "fav3"],
+        choices=["default", "math", "efficient", "cudnn", "fav2", "fav3", "fakv"],
         default="default",
         help="Backend to use for attention computation",
     )
